@@ -1,0 +1,7 @@
+strands-agents[openai,otel]==1.57.1
+openai==2.54.0
+fastapi==0.141.1
+uvicorn[standard]==0.54.0
+pyjwt==2.15.0
+python-dotenv==1.2.3
+httpx==0.28.1

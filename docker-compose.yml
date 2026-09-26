@@ -1,0 +1,21 @@
+services:
+  backend:
+    build: ./backend
+    env_file: ./backend/.env
+    environment:
+      # oMLX runs natively on the Mac (port 8001); the container reaches it via host.docker.internal
+      OMLX_BASE_URL: http://host.docker.internal:8001/v1
+      DB_PATH: /app/data/demo.db
+      SESSIONS_DIR: /app/data/sessions
+    volumes:
+      - backend-data:/app/data
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  backend-data:
