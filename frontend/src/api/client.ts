@@ -62,12 +62,12 @@ export async function sendMessage(id: string, message: string, h: StreamHandlers
       body: JSON.stringify({ message }),
     });
   } catch {
-    h.onError("Không kết nối được server");
+    h.onError("Cannot connect to the server");
     return;
   }
   if (res.status === 401) handleUnauthorized("");
   if (!res.ok || !res.body) {
-    h.onError(res.status === 409 ? "Đang xử lý tin nhắn trước, vui lòng đợi" : `Lỗi ${res.status}`);
+    h.onError(res.status === 409 ? "Still processing the previous message, please wait" : `Error ${res.status}`);
     return;
   }
 
@@ -96,5 +96,5 @@ export async function sendMessage(id: string, message: string, h: StreamHandlers
   } catch {
     // network dropped mid-stream; handled below
   }
-  if (!finished) h.onError("Mất kết nối tới server giữa chừng");
+  if (!finished) h.onError("Lost connection to the server mid-response");
 }

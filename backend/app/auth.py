@@ -31,7 +31,7 @@ def get_current_user(cred: HTTPAuthorizationCredentials = Depends(bearer)) -> st
     try:
         payload = jwt.decode(cred.credentials, JWT_SECRET, algorithms=["HS256"])
     except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="Token không hợp lệ")
+        raise HTTPException(status_code=401, detail="Invalid token")
     return payload["sub"]
 
 
@@ -45,5 +45,5 @@ def login(body: LoginRequest) -> dict:
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM users WHERE username = ?", (body.username,)).fetchone()
     if not row or not secrets.compare_digest(row["password_hash"], hash_password(body.password, row["salt"])):
-        raise HTTPException(status_code=401, detail="Sai tài khoản hoặc mật khẩu")
+        raise HTTPException(status_code=401, detail="Invalid username or password")
     return {"token": create_token(row["id"])}

@@ -13,7 +13,7 @@ export default function Login({ onSuccess }: { onSuccess: () => void }) {
       setToken(token);
       onSuccess();
     } catch {
-      setError("Sai tài khoản hoặc mật khẩu");
+      setError("Invalid username or password");
     }
   };
 
@@ -26,7 +26,7 @@ export default function Login({ onSuccess }: { onSuccess: () => void }) {
         <input className="w-full rounded border p-2" type="password" value={password}
           onChange={(e) => setPassword(e.target.value)} placeholder="Password" />
         {error && <p className="text-sm text-red-600">{error}</p>}
-        <button className="w-full rounded bg-blue-600 p-2 text-white">Đăng nhập</button>
+        <button className="w-full rounded bg-blue-600 p-2 text-white">Log in</button>
       </form>
     </div>
   );

@@ -46,7 +46,7 @@ export default function App() {
         <ChatPane key={activeId} conversationId={activeId} onTurnComplete={refresh} />
       ) : (
         <div className="flex flex-1 items-center justify-center text-gray-400">
-          Chọn hoặc tạo một cuộc hội thoại
+          Select or create a conversation
         </div>
       )}
     </div>

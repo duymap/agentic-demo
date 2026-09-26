@@ -12,7 +12,7 @@ from app.config import SESSIONS_DIR
 from app.db import get_conn
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
-DEFAULT_TITLE = "Cuộc hội thoại mới"
+DEFAULT_TITLE = "New conversation"
 
 
 def now() -> str:
@@ -24,7 +24,7 @@ def require_owner(conversation_id: str, user_id: str) -> None:
         row = conn.execute("SELECT user_id FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
     # 404 for both "does not exist" and "not yours" so valid IDs are not leaked
     if not row or row["user_id"] != user_id:
-        raise HTTPException(status_code=404, detail="Không tìm thấy hội thoại")
+        raise HTTPException(status_code=404, detail="Conversation not found")
 
 
 def touch_conversation(conversation_id: str, first_message: str) -> None:

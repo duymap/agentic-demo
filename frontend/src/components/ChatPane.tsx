@@ -3,8 +3,8 @@ import { api, sendMessage, type ChatMessage } from "../api/client";
 import MessageBubble from "./MessageBubble";
 
 const TOOL_LABELS: Record<string, string> = {
-  billing_agent: "Đang hỏi chuyên viên billing…",
-  tech_support_agent: "Đang hỏi chuyên viên kỹ thuật…",
+  billing_agent: "Asking the billing specialist…",
+  tech_support_agent: "Asking the tech support specialist…",
 };
 
 type Props = { conversationId: string; onTurnComplete: () => void };
@@ -52,7 +52,7 @@ export default function ChatPane({ conversationId, onTurnComplete }: Props) {
       onToken: appendToLast,
       onToolStart: (tool) => {
         breakParagraph();
-        setActivity((prev) => [...prev, TOOL_LABELS[tool] ?? `Đang chạy ${tool}…`]);
+        setActivity((prev) => [...prev, TOOL_LABELS[tool] ?? `Running ${tool}…`]);
       },
       onDone: onTurnComplete,
       onError: (msg) => appendToLast(`\n\n⚠️ ${msg}`),
@@ -70,7 +70,7 @@ export default function ChatPane({ conversationId, onTurnComplete }: Props) {
       <div className="flex-1 space-y-3 overflow-y-auto p-6">
         {messages.map((m, i) =>
           m.content ? <MessageBubble key={i} message={m} /> : null)}
-        {waiting && <p className="text-sm italic text-gray-500">Đang suy nghĩ…</p>}
+        {waiting && <p className="text-sm italic text-gray-500">Thinking…</p>}
         {busy && activity.map((a, i) => (
           <p key={i} className="text-sm italic text-gray-500">{a}</p>
         ))}
@@ -82,14 +82,14 @@ export default function ChatPane({ conversationId, onTurnComplete }: Props) {
           rows={2}
           value={input}
           disabled={busy}
-          placeholder="Nhập câu hỏi…"
+          placeholder="Ask a question…"
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); }
           }}
         />
         <button onClick={send} disabled={busy} className="rounded bg-blue-600 px-4 text-white disabled:opacity-50">
-          Gửi
+          Send
         </button>
       </div>
     </main>

@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id),
-    title TEXT NOT NULL DEFAULT 'Cuộc hội thoại mới',
+    title TEXT NOT NULL DEFAULT 'New conversation',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );

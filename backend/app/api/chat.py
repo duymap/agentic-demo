@@ -37,7 +37,7 @@ async def send_message(
 
     lock = get_lock(cid)
     if lock.locked():
-        raise HTTPException(status_code=409, detail="Hội thoại đang xử lý tin nhắn trước")
+        raise HTTPException(status_code=409, detail="Conversation is still processing the previous message")
     await lock.acquire()
 
     released = False
@@ -70,10 +70,10 @@ async def send_message(
             yield sse("done", {})
         except TimeoutError:
             logger.warning("Timeout conversation_id=%s user_id=%s", cid, user_id)
-            yield sse("error", {"message": "Quá thời gian xử lý, vui lòng thử lại"})
+            yield sse("error", {"message": "Request timed out, please try again"})
         except Exception:
             logger.exception("Error handling conversation_id=%s user_id=%s", cid, user_id)
-            yield sse("error", {"message": "Có lỗi khi xử lý, vui lòng thử lại"})
+            yield sse("error", {"message": "Something went wrong, please try again"})
         finally:
             release()
 

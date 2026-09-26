@@ -276,7 +276,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id),
-    title TEXT NOT NULL DEFAULT 'Cuộc hội thoại mới',
+    title TEXT NOT NULL DEFAULT 'New conversation',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -564,7 +564,7 @@ def get_current_user(cred: HTTPAuthorizationCredentials = Depends(bearer)) -> st
     try:
         payload = jwt.decode(cred.credentials, JWT_SECRET, algorithms=["HS256"])
     except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="Token không hợp lệ")
+        raise HTTPException(status_code=401, detail="Invalid token")
     return payload["sub"]
 
 
@@ -578,7 +578,7 @@ def login(body: LoginRequest) -> dict:
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM users WHERE username = ?", (body.username,)).fetchone()
     if not row or not secrets.compare_digest(row["password_hash"], hash_password(body.password, row["salt"])):
-        raise HTTPException(status_code=401, detail="Sai tài khoản hoặc mật khẩu")
+        raise HTTPException(status_code=401, detail="Invalid username or password")
     return {"token": create_token(row["id"])}
 ```
 
@@ -611,7 +611,7 @@ from app.config import SESSIONS_DIR
 from app.db import get_conn
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
-DEFAULT_TITLE = "Cuộc hội thoại mới"
+DEFAULT_TITLE = "New conversation"
 
 
 def now() -> str:
@@ -623,7 +623,7 @@ def require_owner(conversation_id: str, user_id: str) -> None:
         row = conn.execute("SELECT user_id FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
     # 404 for both "does not exist" and "not yours" so valid IDs are not leaked
     if not row or row["user_id"] != user_id:
-        raise HTTPException(status_code=404, detail="Không tìm thấy hội thoại")
+        raise HTTPException(status_code=404, detail="Conversation not found")
 
 
 def touch_conversation(conversation_id: str, first_message: str) -> None:
@@ -777,7 +777,7 @@ async def send_message(
 
     lock = get_lock(cid)
     if lock.locked():
-        raise HTTPException(status_code=409, detail="Hội thoại đang xử lý tin nhắn trước")
+        raise HTTPException(status_code=409, detail="Conversation is still processing the previous message")
     await lock.acquire()
 
     async def event_stream():
@@ -799,10 +799,10 @@ async def send_message(
             touch_conversation(cid, body.message)
             yield sse("done", {})
         except TimeoutError:
-            yield sse("error", {"message": "Quá thời gian xử lý, vui lòng thử lại"})
+            yield sse("error", {"message": "Request timed out, please try again"})
         except Exception:
             logger.exception("Error handling conversation %s", cid)
-            yield sse("error", {"message": "Có lỗi khi xử lý, vui lòng thử lại"})
+            yield sse("error", {"message": "Something went wrong, please try again"})
         finally:
             lock.release()
 
@@ -918,7 +918,7 @@ export async function sendMessage(id: string, message: string, h: StreamHandlers
     body: JSON.stringify({ message }),
   });
   if (!res.ok || !res.body) {
-    h.onError(res.status === 409 ? "Đang xử lý tin nhắn trước, vui lòng đợi" : `Lỗi ${res.status}`);
+    h.onError(res.status === 409 ? "Still processing the previous message, please wait" : `Error ${res.status}`);
     return;
   }
 
@@ -994,7 +994,7 @@ export default function App() {
         <ChatPane key={activeId} conversationId={activeId} onTurnComplete={refresh} />
       ) : (
         <div className="flex flex-1 items-center justify-center text-gray-400">
-          Chọn hoặc tạo một cuộc hội thoại
+          Select or create a conversation
         </div>
       )}
     </div>
@@ -1020,7 +1020,7 @@ export default function Login({ onSuccess }: { onSuccess: () => void }) {
       setToken(token);
       onSuccess();
     } catch {
-      setError("Sai tài khoản hoặc mật khẩu");
+      setError("Invalid username or password");
     }
   };
 
@@ -1033,7 +1033,7 @@ export default function Login({ onSuccess }: { onSuccess: () => void }) {
         <input className="w-full rounded border p-2" type="password" value={password}
           onChange={(e) => setPassword(e.target.value)} placeholder="Password" />
         {error && <p className="text-sm text-red-600">{error}</p>}
-        <button className="w-full rounded bg-blue-600 p-2 text-white">Đăng nhập</button>
+        <button className="w-full rounded bg-blue-600 p-2 text-white">Log in</button>
       </form>
     </div>
   );
@@ -1058,7 +1058,7 @@ export default function Sidebar({ conversations, activeId, onSelect, onCreate, o
   return (
     <aside className="flex w-72 flex-col border-r bg-white">
       <button onClick={onCreate} className="m-3 rounded bg-blue-600 p-2 text-white">
-        + Cuộc hội thoại mới
+        + New conversation
       </button>
       <ul className="flex-1 overflow-y-auto">
         {conversations.map((c) => (
@@ -1075,7 +1075,7 @@ export default function Sidebar({ conversations, activeId, onSelect, onCreate, o
         ))}
       </ul>
       <button onClick={onLogout} className="m-3 text-sm text-gray-500 hover:underline">
-        Đăng xuất
+        Log out
       </button>
     </aside>
   );
@@ -1111,8 +1111,8 @@ import { api, sendMessage, type ChatMessage } from "../api/client";
 import MessageBubble from "./MessageBubble";
 
 const TOOL_LABELS: Record<string, string> = {
-  billing_agent: "Đang hỏi chuyên viên billing…",
-  tech_support_agent: "Đang hỏi chuyên viên kỹ thuật…",
+  billing_agent: "Asking the billing specialist…",
+  tech_support_agent: "Asking the tech support specialist…",
 };
 
 type Props = { conversationId: string; onTurnComplete: () => void };
@@ -1150,7 +1150,7 @@ export default function ChatPane({ conversationId, onTurnComplete }: Props) {
 
     await sendMessage(conversationId, text, {
       onToken: appendToLast,
-      onToolStart: (tool) => setActivity((prev) => [...prev, TOOL_LABELS[tool] ?? `Đang chạy ${tool}…`]),
+      onToolStart: (tool) => setActivity((prev) => [...prev, TOOL_LABELS[tool] ?? `Running ${tool}…`]),
       onDone: onTurnComplete,
       onError: (msg) => appendToLast(`\n\n⚠️ ${msg}`),
     });
@@ -1174,14 +1174,14 @@ export default function ChatPane({ conversationId, onTurnComplete }: Props) {
           rows={2}
           value={input}
           disabled={busy}
-          placeholder="Nhập câu hỏi…"
+          placeholder="Ask a question…"
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
           }}
         />
         <button onClick={send} disabled={busy} className="rounded bg-blue-600 px-4 text-white disabled:opacity-50">
-          Gửi
+          Send
         </button>
       </div>
     </main>

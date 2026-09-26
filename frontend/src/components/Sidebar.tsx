@@ -13,7 +13,7 @@ export default function Sidebar({ conversations, activeId, onSelect, onCreate, o
   return (
     <aside className="flex w-72 flex-col border-r bg-white">
       <button onClick={onCreate} className="m-3 rounded bg-blue-600 p-2 text-white">
-        + Cuộc hội thoại mới
+        + New conversation
       </button>
       <ul className="flex-1 overflow-y-auto">
         {conversations.map((c) => (
@@ -23,7 +23,7 @@ export default function Sidebar({ conversations, activeId, onSelect, onCreate, o
             onClick={() => onSelect(c.id)}>
             <span className="truncate">{c.title}</span>
             <button className="hidden text-gray-400 hover:text-red-600 group-hover:block"
-              title="Xóa hội thoại"
+              title="Delete conversation"
               onClick={(e) => { e.stopPropagation(); onDelete(c.id); }}>
               ✕
             </button>
@@ -31,7 +31,7 @@ export default function Sidebar({ conversations, activeId, onSelect, onCreate, o
         ))}
       </ul>
       <button onClick={onLogout} className="m-3 text-sm text-gray-500 hover:underline">
-        Đăng xuất
+        Log out
       </button>
     </aside>
   );
