@@ -1,10 +1,9 @@
-from strands import Agent
-from strands.agent.conversation_manager import SlidingWindowConversationManager
-from strands.session.file_session_manager import FileSessionManager
+from agent_framework import Agent, AgentSession, CompactionProvider, FileHistoryProvider, SlidingWindowStrategy
 
-from app.agents.model import get_model
+from app.agents.model import MODEL_OPTIONS, get_client
 from app.agents.specialists import billing_agent, tech_support_agent
 from app.config import SESSIONS_DIR
+from app.telemetry import set_trace_attributes
 
 ORCHESTRATOR_PROMPT = """You are a customer support coordinator. You have NO data of your own;
 all customer information must come from two specialists:
@@ -30,14 +29,28 @@ outstanding balance?") AND tech_support_agent("Can customer C-2048's account log
 Reply in the same language as the user, using markdown when helpful."""
 
 
-def build_orchestrator(conversation_id: str, user_id: str | None = None) -> Agent:
-    """Build the orchestrator for one conversation. History is loaded/saved by the session manager."""
-    return Agent(
-        model=get_model(),
-        system_prompt=ORCHESTRATOR_PROMPT,
-        tools=[billing_agent, tech_support_agent],
-        conversation_manager=SlidingWindowConversationManager(window_size=20),
-        session_manager=FileSessionManager(session_id=conversation_id, storage_dir=SESSIONS_DIR),
-        trace_attributes={"session.id": conversation_id, "user.id": user_id or "anonymous"},
-        callback_handler=None,
+def get_history() -> FileHistoryProvider:
+    """One JSONL file per conversation: <SESSIONS_DIR>/<conversation_id>.jsonl"""
+    return FileHistoryProvider(SESSIONS_DIR)
+
+
+def build_orchestrator(conversation_id: str, user_id: str | None = None) -> tuple[Agent, AgentSession]:
+    """Build the orchestrator for one conversation. History is loaded/saved per session by the history provider."""
+    set_trace_attributes({"session.id": conversation_id, "user.id": user_id or "anonymous"})
+    history = get_history()
+    agent = Agent(
+        client=get_client(),
+        instructions=ORCHESTRATOR_PROMPT,
+        name="orchestrator",
+        tools=[billing_agent(), tech_support_agent()],
+        default_options=MODEL_OPTIONS,
+        context_providers=[
+            history,
+            # Only the most recent turns are sent to the model; the file keeps the full history
+            CompactionProvider(
+                before_strategy=SlidingWindowStrategy(keep_last_groups=20),
+                history_source_id=history.source_id,
+            ),
+        ],
     )
+    return agent, agent.create_session(session_id=conversation_id)
