@@ -17,7 +17,8 @@ export default function ChatPane({ conversationId, onTurnComplete }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    api.getMessages(conversationId).then(setMessages);
+    // Don't clobber a message sent before the history request returned
+    api.getMessages(conversationId).then((history) => setMessages((prev) => (prev.length ? prev : history)));
   }, [conversationId]);
 
   useEffect(() => {
