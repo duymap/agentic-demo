@@ -1,11 +1,11 @@
 # Agentic Customer Support Demo
 
-An orchestrator (Strands Agents) coordinates two specialist agents — `billing_agent` and `tech_support_agent` — running entirely on a local model served by oMLX. Design details: [`agentic-demo-plan.md`](agentic-demo-plan.md).
+An orchestrator ([Microsoft Agent Framework](https://github.com/microsoft/agent-framework)) coordinates two specialist agents — `billing_agent` and `tech_support_agent` — running entirely on a local model served by oMLX. Design details: [`agentic-demo-plan.md`](agentic-demo-plan.md).
 
 ```
-React (Vite, :5173) ──/api──▶ FastAPI + Strands (:8002) ──OpenAI API──▶ oMLX (:8001)
+React (Vite, :5173) ──/api──▶ FastAPI + MAF (:8002) ──OpenAI API──▶ oMLX (:8001)
                                    │
-                    SQLite + ./data/sessions (FileSessionManager)
+                    SQLite + ./data/sessions (FileHistoryProvider)
 ```
 
 ## Requirements
@@ -62,19 +62,19 @@ python scripts/smoke_test.py   # Phase 0: 10 tool-calling runs, needs >= 9/10
 | `ENABLE_THINKING` | `false` | Qwen3 thinking mode. Off makes nested agent calls faster |
 | `JWT_SECRET` | — | `python -c "import secrets; print(secrets.token_hex(32))"` |
 | `TURN_TIMEOUT_S` | `300` | Timeout per chat turn |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | (empty) | Optional. Set it to send Strands traces to Langfuse / an OTLP collector |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | (empty) | Optional. Set it to send Agent Framework traces to Langfuse / an OTLP collector |
 | `OTEL_EXPORTER_OTLP_HEADERS` | (empty) | E.g. `Authorization=Basic <base64 pk:sk>` for Langfuse |
 
 ## Data storage
 
 - **SQLite** (`backend/data/demo.db`): users, the conversation list (id, owner, title, timestamps) and the demo data (customers, invoices, accounts).
-- **JSON files** (`backend/data/sessions/session_<conversation_id>/`): the full message history of each conversation, written by Strands `FileSessionManager`, including tool calls and specialist results.
+- **JSONL files** (`backend/data/sessions/<conversation_id>.jsonl`): the full message history of each conversation, one message per line, written by Agent Framework's `FileHistoryProvider`, including tool calls and specialist results. Only the last 20 message groups are sent to the model (`SlidingWindowStrategy`).
 
 Back up both when backing up the app.
 
 ## Observability (optional)
 
-The agent framework is **Strands**; Strands emits OpenTelemetry traces on its own (orchestrator → specialist → tool, latency, tokens). Langfuse is only a place to view those traces. If `OTEL_EXPORTER_OTLP_ENDPOINT` is not set, telemetry is off and the app runs normally.
+The agent framework is **Microsoft Agent Framework**; it emits OpenTelemetry GenAI traces on its own (orchestrator → specialist → tool, latency, tokens). Langfuse is only a place to view those traces. If `OTEL_EXPORTER_OTLP_ENDPOINT` is not set, telemetry is off and the app runs normally.
 
 ## Demo scenarios
 

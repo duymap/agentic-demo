@@ -53,18 +53,17 @@ async def send_message(
     async def event_stream():
         announced: set[str] = set()
         try:
-            agent = build_orchestrator(cid, user_id)
+            agent, session = build_orchestrator(cid, user_id)
             async with asyncio.timeout(TURN_TIMEOUT_S):
-                async for event in agent.stream_async(body.message):
-                    if "data" in event:
-                        yield sse("token", {"text": event["data"]})
+                async for update in agent.run(body.message, stream=True, session=session):
+                    if update.text:
+                        yield sse("token", {"text": update.text})
 
-                    tool_use = event.get("current_tool_use")
-                    if tool_use and tool_use.get("name"):
-                        tool_id = tool_use.get("toolUseId")
-                        if tool_id not in announced:  # this event repeats while the input streams in
-                            announced.add(tool_id)
-                            yield sse("tool_start", {"tool": tool_use["name"]})
+                    for content in update.contents:
+                        # Tool-call arguments stream in over several chunks; only the first carries the name
+                        if content.type == "function_call" and content.name and content.call_id not in announced:
+                            announced.add(content.call_id)
+                            yield sse("tool_start", {"tool": content.name})
 
             touch_conversation(cid, body.message)
             yield sse("done", {})

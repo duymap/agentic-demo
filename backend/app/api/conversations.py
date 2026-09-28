@@ -1,4 +1,3 @@
-import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -6,7 +5,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 
-from app.agents.orchestrator import build_orchestrator
+from app.agents.orchestrator import get_history
 from app.auth import get_current_user
 from app.config import SESSIONS_DIR
 from app.db import get_conn
@@ -60,22 +59,21 @@ def create_conversation(user_id: str = Depends(get_current_user)) -> dict:
 
 
 @router.get("/{conversation_id}/messages")
-def get_messages(conversation_id: UUID, user_id: str = Depends(get_current_user)) -> list[dict]:
+async def get_messages(conversation_id: UUID, user_id: str = Depends(get_current_user)) -> list[dict]:
     cid = str(conversation_id)
     require_owner(cid, user_id)
-    agent = build_orchestrator(cid, user_id)  # the session manager reloads the history
     history = []
-    for msg in agent.messages:
-        # Keep text only; skip toolUse / toolResult
-        text = "".join(block["text"] for block in msg["content"] if "text" in block)
-        if not text.strip():
+    for msg in await get_history().get_messages(cid):
+        # Keep text only; skip function calls / function results
+        text = msg.text
+        if msg.role not in ("user", "assistant") or not text.strip():
             continue
-        # One orchestrator turn can span several assistant messages (with toolResults in between);
+        # One orchestrator turn can span several assistant messages (with tool results in between);
         # merge them into one bubble, like during streaming
-        if history and history[-1]["role"] == msg["role"] == "assistant":
+        if history and history[-1]["role"] == msg.role == "assistant":
             history[-1]["content"] += "\n\n" + text
         else:
-            history.append({"role": msg["role"], "content": text})
+            history.append({"role": msg.role, "content": text})
     return history
 
 
@@ -85,6 +83,6 @@ def delete_conversation(conversation_id: UUID, user_id: str = Depends(get_curren
     require_owner(cid, user_id)
     with get_conn() as conn:
         conn.execute("DELETE FROM conversations WHERE id = ?", (cid,))
-    # FileSessionManager stores data in <SESSIONS_DIR>/session_<id>/
-    shutil.rmtree(Path(SESSIONS_DIR) / f"session_{cid}", ignore_errors=True)
+    # FileHistoryProvider stores data in <SESSIONS_DIR>/<id>.jsonl
+    (Path(SESSIONS_DIR) / f"{cid}.jsonl").unlink(missing_ok=True)
     return Response(status_code=204)
