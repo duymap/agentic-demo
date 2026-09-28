@@ -1,6 +1,6 @@
 # Plan: Agentic Customer Support Demo
 
-**Stack:** Strands Agents (Python) · FastAPI · React + Vite + TypeScript · oMLX (local model on Apple Silicon)
+**Stack:** Microsoft Agent Framework (Python) · FastAPI · React + Vite + TypeScript · oMLX (local model on Apple Silicon)
 
 ---
 
@@ -19,21 +19,21 @@ A customer support chat app in which an **orchestrator** coordinates two **speci
 
 ```
 ┌──────────────┐  HTTP + SSE   ┌────────────────────────┐  OpenAI API   ┌─────────────┐
-│ React (Vite) │ ────────────▶ │ FastAPI + Strands      │ ────────────▶ │ oMLX (Mac)  │
+│ React (Vite) │ ────────────▶ │ FastAPI + MAF          │ ────────────▶ │ oMLX (Mac)  │
 └──────────────┘   /api/*      │  - orchestrator        │  /v1/...      └─────────────┘
                                │  - billing_agent       │
                                │  - tech_support_agent  │
                                └──────────┬─────────────┘
                                           │
                      SQLite (users, conversations, mock data)
-                     ./sessions (conversation history - FileSessionManager)
+                     ./sessions (conversation history - FileHistoryProvider)
 ```
 
-**Key constraint:** oMLX only runs on macOS Apple Silicon (M-series); it does not run on Linux or NVIDIA GPUs. The demo's model host is a Mac. The backend connects through Strands' `OpenAIModel` provider with `base_url` pointing at oMLX, so switching later to vLLM/Ollama on a GPU server or the cloud only requires changing `OMLX_BASE_URL` and `MODEL_ID`.
+**Key constraint:** oMLX only runs on macOS Apple Silicon (M-series); it does not run on Linux or NVIDIA GPUs. The demo's model host is a Mac. The backend connects through Agent Framework's `OpenAIChatCompletionClient` with `base_url` pointing at oMLX, so switching later to vLLM/Ollama on a GPU server or the cloud only requires changing `OMLX_BASE_URL` and `MODEL_ID`.
 
 **Design principles:**
 
-- **Stateless** backend: each request builds a new orchestrator; history is loaded and saved by the session manager under `session_id = conversation_id`.
+- **Stateless** backend: each request builds a new orchestrator; history is loaded and saved by `FileHistoryProvider` for the `AgentSession` whose `session_id = conversation_id`.
 - Only the **orchestrator holds the conversation**. Specialist agents are stateless and created fresh on every call; the orchestrator is responsible for passing along enough context.
 - The **server generates the `conversation_id`** (UUID) and **always checks ownership** before any operation.
 - Each conversation processes **only one message at a time** (lock; return 409 if busy).
@@ -46,12 +46,12 @@ A customer support chat app in which an **orchestrator** coordinates two **speci
 |---|---|
 | Model server | oMLX, OpenAI-compatible API |
 | Starting model | Qwen3.5-9B, MLX 4-bit build (switch to a larger model if the Mac has more RAM) |
-| Agent framework | `strands-agents[openai,otel]` |
+| Agent framework | Microsoft Agent Framework (`agent-framework-core` + `agent-framework-openai`) |
 | API | FastAPI + Uvicorn, Python 3.12 |
-| Storage | SQLite (metadata + mock data), `FileSessionManager` (conversation history) |
+| Storage | SQLite (metadata + mock data), `FileHistoryProvider` (conversation history, one JSONL file per conversation) |
 | Auth | JWT (PyJWT), 2 pre-seeded demo users |
 | Frontend | React + Vite + TypeScript + Tailwind CSS v4 + react-markdown |
-| Observability | Strands OpenTelemetry → Langfuse |
+| Observability | Agent Framework OpenTelemetry (GenAI spans) → OTLP/HTTP → Langfuse |
 | Packaging | Docker Compose (backend + frontend/nginx), oMLX runs natively |
 
 ---
@@ -71,7 +71,7 @@ agentic-demo/
 │   │   ├── telemetry.py         # OpenTelemetry → Langfuse (Phase 5)
 │   │   ├── agents/
 │   │   │   ├── __init__.py
-│   │   │   ├── model.py         # get_model() -> OpenAIModel pointing at oMLX
+│   │   │   ├── model.py         # get_client() -> OpenAIChatCompletionClient pointing at oMLX
 │   │   │   ├── tools.py         # tools that read SQLite data
 │   │   │   ├── specialists.py   # billing_agent, tech_support_agent
 │   │   │   └── orchestrator.py  # build_orchestrator()
@@ -151,12 +151,12 @@ curl http://localhost:8000/v1/chat/completions \
 
 Take the exact model `id` from the `/v1/models` output to use as `MODEL_ID`.
 
-**Step 2.** Run the tool-calling smoke test with Strands.
+**Step 2.** Run the tool-calling smoke test with Agent Framework.
 
 ```bash
 cd backend
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install "strands-agents[openai]"
+pip install agent-framework-core agent-framework-openai python-dotenv
 export MODEL_ID="<id from /v1/models>"
 python scripts/smoke_test.py
 ```
@@ -164,51 +164,63 @@ python scripts/smoke_test.py
 `backend/scripts/smoke_test.py`:
 
 ```python
-"""Check whether the model on oMLX calls tools reliably (10 runs)."""
+"""Check that the model on oMLX calls tools reliably (10 runs)."""
+import asyncio
 import json
 import os
+from typing import Annotated
 
-from strands import Agent, tool
-from strands.models.openai import OpenAIModel
+from agent_framework import Agent, tool
+from agent_framework.openai import OpenAIChatCompletionClient
+from dotenv import load_dotenv
+from pydantic import Field
+
+load_dotenv()
 
 calls = {"n": 0}
 
 
 @tool
-def get_latest_invoice(customer_id: str) -> str:
-    """Look up a customer's most recent invoice.
-
-    Args:
-        customer_id: Customer ID, e.g. C-1024
-    """
+def get_latest_invoice(customer_id: Annotated[str, Field(description="Customer ID, e.g. C-1024")]) -> str:
+    """Look up the latest invoice of a customer."""
     calls["n"] += 1
     return json.dumps({"customer_id": customer_id, "amount_usd": 120.0, "status": "overdue"})
 
 
-model = OpenAIModel(
-    client_args={
-        "api_key": os.getenv("OMLX_API_KEY", "local"),
-        "base_url": os.getenv("OMLX_BASE_URL", "http://localhost:8000/v1"),
-    },
-    model_id=os.environ["MODEL_ID"],
-    params={"temperature": 0.2, "max_tokens": 1024},
+client = OpenAIChatCompletionClient(
+    model=os.environ["MODEL_ID"],
+    api_key=os.getenv("OMLX_API_KEY", "local"),
+    base_url=os.getenv("OMLX_BASE_URL", "http://127.0.0.1:8001/v1"),
 )
+options = {
+    "temperature": 0.2,
+    "max_tokens": 1024,
+    "extra_body": {
+        "chat_template_kwargs": {"enable_thinking": os.getenv("ENABLE_THINKING", "false").lower() == "true"}
+    },
+}
 
-ok = 0
-for i in range(10):
-    calls["n"] = 0
-    agent = Agent(
-        model=model,
-        tools=[get_latest_invoice],
-        system_prompt="Always use the tool to look up invoices; never make up figures.",
-        callback_handler=None,
-    )
-    result = agent("How much is customer C-1024's invoice, and is it overdue?")
-    hit = calls["n"] > 0
-    ok += hit
-    print(f"#{i + 1} tool_called={hit} -> {str(result)[:80]!r}")
 
-print(f"\nTool called {ok}/10 times")
+async def main() -> None:
+    ok = 0
+    for i in range(10):
+        calls["n"] = 0
+        agent = Agent(
+            client=client,
+            instructions="Always use the tool to look up invoices; never make up numbers.",
+            tools=[get_latest_invoice],
+            default_options=options,
+        )
+        result = await agent.run("How much is customer C-1024's invoice, and is it overdue?")
+        hit = calls["n"] > 0
+        correct = "120" in result.text
+        ok += hit and correct
+        print(f"#{i + 1} tool_called={hit} correct={correct} -> {result.text[:80]!r}")
+
+    print(f"\nTool called correctly {ok}/10 times")
+
+
+asyncio.run(main())
 ```
 
 **Completion criteria:** the tool is called at least 9/10 times and the answer uses the correct figures from the tool.
@@ -217,26 +229,37 @@ print(f"\nTool called {ok}/10 times")
 
 ### Phase 1 — Backend core (agents + data)
 
-**`backend/requirements.txt`** (pin versions with `pip freeze` once Phase 0 runs reliably):
+**`backend/requirements.txt`** (versions pinned once Phase 0 ran reliably):
 
 ```
-strands-agents[openai,otel]
-fastapi
-uvicorn[standard]
-pyjwt
-python-dotenv
+agent-framework-core==1.19.0
+agent-framework-openai==1.14.4
+openai==2.54.0
+opentelemetry-sdk==1.45.0
+opentelemetry-exporter-otlp-proto-http==1.45.0
+fastapi==0.141.1
+uvicorn[standard]==0.54.0
+pyjwt==2.15.0
+python-dotenv==1.2.3
+httpx==0.28.1
 ```
 
 **`backend/.env.example`**:
 
 ```bash
-OMLX_BASE_URL=http://localhost:8000/v1
-OMLX_API_KEY=local
-MODEL_ID=<id from /v1/models>
+OMLX_BASE_URL=http://127.0.0.1:8001/v1
+OMLX_API_KEY=admin
+MODEL_ID=Qwen3.8-27B-MLX-4bit
+# Qwen3 thinking mode: false = much faster for nested agent calls
+ENABLE_THINKING=false
 JWT_SECRET=<random string, e.g.: python -c "import secrets; print(secrets.token_hex(32))">
 DB_PATH=./data/demo.db
 SESSIONS_DIR=./data/sessions
-TURN_TIMEOUT_S=180
+TURN_TIMEOUT_S=300
+
+# Optional (Phase 5): Agent Framework OpenTelemetry traces (OTLP over HTTP) -> Langfuse. Leave empty = disabled.
+# OTEL_EXPORTER_OTLP_ENDPOINT=https://cloud.langfuse.com/api/public/otel
+# OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64 of "pk-lf-...:sk-lf-...">
 ```
 
 **`app/config.py`**:
@@ -367,36 +390,39 @@ if __name__ == "__main__":
 **`app/agents/model.py`**:
 
 ```python
-from strands.models.openai import OpenAIModel
+from agent_framework.openai import OpenAIChatCompletionClient
 
-from app.config import MODEL_ID, OMLX_API_KEY, OMLX_BASE_URL
+from app.config import ENABLE_THINKING, MODEL_ID, OMLX_API_KEY, OMLX_BASE_URL
+
+MODEL_OPTIONS = {
+    "temperature": 0.2,
+    "max_tokens": 2048,
+    # Qwen3: toggle thinking via the chat template (oMLX accepts it through extra_body)
+    "extra_body": {"chat_template_kwargs": {"enable_thinking": ENABLE_THINKING}},
+}
 
 
-def get_model() -> OpenAIModel:
-    return OpenAIModel(
-        client_args={"api_key": OMLX_API_KEY, "base_url": OMLX_BASE_URL},
-        model_id=MODEL_ID,
-        params={"temperature": 0.2, "max_tokens": 2048},
-    )
+def get_client() -> OpenAIChatCompletionClient:
+    return OpenAIChatCompletionClient(model=MODEL_ID, api_key=OMLX_API_KEY, base_url=OMLX_BASE_URL)
 ```
 
 **`app/agents/tools.py`**:
 
 ```python
 import json
+from typing import Annotated
 
-from strands import tool
+from agent_framework import tool
+from pydantic import Field
 
 from app.db import get_conn
 
+CustomerId = Annotated[str, Field(description="Customer ID, e.g. C-1024")]
+
 
 @tool
-def get_latest_invoice(customer_id: str) -> str:
-    """Look up a customer's most recent invoice and plan.
-
-    Args:
-        customer_id: Customer ID, e.g. C-1024
-    """
+def get_latest_invoice(customer_id: CustomerId) -> str:
+    """Look up the latest invoice and plan of a customer."""
     with get_conn() as conn:
         row = conn.execute(
             """SELECT i.id, i.customer_id, c.name, c.plan, i.amount_usd, i.status, i.due_date
@@ -410,12 +436,8 @@ def get_latest_invoice(customer_id: str) -> str:
 
 
 @tool
-def check_account_status(customer_id: str) -> str:
-    """Check account status (locked or not, lock reason, number of failed logins).
-
-    Args:
-        customer_id: Customer ID, e.g. C-1024
-    """
+def check_account_status(customer_id: CustomerId) -> str:
+    """Check account status (locked or not, lock reason, number of failed logins)."""
     with get_conn() as conn:
         row = conn.execute(
             """SELECT a.customer_id, c.name, a.locked, a.lock_reason, a.failed_logins
@@ -431,85 +453,113 @@ def check_account_status(customer_id: str) -> str:
 **`app/agents/specialists.py`** (stateless — created fresh on every call, never shared between users):
 
 ```python
-from strands import Agent, tool
+from agent_framework import Agent, FunctionTool
 
-from app.agents.model import get_model
+from app.agents.model import MODEL_OPTIONS, get_client
 from app.agents.tools import check_account_status, get_latest_invoice
 
 BILLING_PROMPT = """You are a billing specialist.
-Only answer questions about invoices, payments and plans. Always use tools to look up data;
-never make up figures. Keep answers short, and state the amount, status and due date clearly."""
+Only answer questions about invoices, payments and plans. Always use the tool to look up data;
+never make up numbers. Be concise and state the amount, status and due date clearly."""
 
 TECH_PROMPT = """You are a technical support specialist.
-Only handle login, account and system error issues. Always check the account status
-with the tool before drawing a conclusion, then give concrete steps to resolve the issue."""
+Only handle login, account and system issues. Always check the account status with the tool
+before drawing conclusions, then give concrete next steps."""
 
 
-@tool
-def billing_agent(query: str) -> str:
-    """Billing expert: handles questions about invoices, payments, overdue status and plans.
-
-    Args:
-        query: The billing question, written with full context and the customer ID
-    """
+def billing_agent() -> FunctionTool:
+    """Billing specialist exposed to the orchestrator as a tool. Runs without a session (stateless)."""
     agent = Agent(
-        model=get_model(),
-        system_prompt=BILLING_PROMPT,
+        client=get_client(),
+        instructions=BILLING_PROMPT,
+        name="billing_agent",
         tools=[get_latest_invoice],
-        callback_handler=None,
+        default_options=MODEL_OPTIONS,
     )
-    return str(agent(query))
+    return agent.as_tool(
+        name="billing_agent",
+        description="Billing specialist: handles questions about invoices, payments, overdue bills and plans.",
+        arg_name="query",
+        arg_description="The billing question, written with full context and the customer ID",
+    )
 
 
-@tool
-def tech_support_agent(query: str) -> str:
-    """Technical expert: handles login errors, account lockouts and system incidents.
-
-    Args:
-        query: Description of the technical issue, written with full context and the customer ID
-    """
+def tech_support_agent() -> FunctionTool:
+    """Tech support specialist exposed to the orchestrator as a tool. Runs without a session (stateless)."""
     agent = Agent(
-        model=get_model(),
-        system_prompt=TECH_PROMPT,
+        client=get_client(),
+        instructions=TECH_PROMPT,
+        name="tech_support_agent",
         tools=[check_account_status],
-        callback_handler=None,
+        default_options=MODEL_OPTIONS,
     )
-    return str(agent(query))
+    return agent.as_tool(
+        name="tech_support_agent",
+        description="Tech support specialist: handles login errors, account locks and system incidents.",
+        arg_name="query",
+        arg_description="Description of the technical issue, with full context and the customer ID",
+    )
 ```
 
 **`app/agents/orchestrator.py`**:
 
 ```python
-from strands import Agent
-from strands.agent.conversation_manager import SlidingWindowConversationManager
-from strands.session.file_session_manager import FileSessionManager
+from agent_framework import Agent, AgentSession, CompactionProvider, FileHistoryProvider, SlidingWindowStrategy
 
-from app.agents.model import get_model
+from app.agents.model import MODEL_OPTIONS, get_client
 from app.agents.specialists import billing_agent, tech_support_agent
 from app.config import SESSIONS_DIR
+from app.telemetry import set_trace_attributes
 
-ORCHESTRATOR_PROMPT = """You are a customer support coordinator.
-- Questions about invoices / payments -> call billing_agent
-- Questions about login / accounts / errors -> call tech_support_agent
-- Multi-part questions: call each agent for its own part, then combine them
-  into ONE coherent answer.
-- Do not answer the specialist part yourself before asking the corresponding agent.
-- The user may use shorthand ("that customer", "what about the other one"). When calling a
-  specialist agent, always rewrite the question with FULL context (customer ID, the issue being discussed).
-- Reply in the same language as the user, using markdown when needed."""
+ORCHESTRATOR_PROMPT = """You are a customer support coordinator. You have NO data of your own;
+all customer information must come from two specialists:
+- billing_agent: invoices, payments, outstanding balances, plans
+- tech_support_agent: login, account lock / unlock, system errors
+
+MANDATORY RULES:
+1. For EVERY message asking about billing or technical issues, call the matching specialist IN
+   THIS TURN, even if the conversation history already contains that information (the data may
+   have changed). Never answer the specialist part from history alone.
+2. Multi-part questions: call each specialist for its own part, then combine the results into
+   ONE coherent answer.
+3. Users often use shorthand ("that customer", "what about the other one"). When calling a
+   specialist, always rewrite the question with FULL context (customer ID, the issue being
+   discussed).
+4. The only exception: if the user just asks for a summary / recap of what was discussed,
+   answer directly from history without calling any specialist.
+
+Example: the previous turn looked up customer C-2048. The user asks "Does that customer still
+owe anything, and can they log in again?" -> call billing_agent("Does customer C-2048 have any
+outstanding balance?") AND tech_support_agent("Can customer C-2048's account log in now?").
+
+Reply in the same language as the user, using markdown when helpful."""
 
 
-def build_orchestrator(conversation_id: str, user_id: str | None = None) -> Agent:
-    """Build the orchestrator for a conversation. History is loaded/saved automatically by the session manager."""
-    return Agent(
-        model=get_model(),
-        system_prompt=ORCHESTRATOR_PROMPT,
-        tools=[billing_agent, tech_support_agent],
-        conversation_manager=SlidingWindowConversationManager(window_size=20),
-        session_manager=FileSessionManager(session_id=conversation_id, storage_dir=SESSIONS_DIR),
-        trace_attributes={"session.id": conversation_id, "user.id": user_id or "anonymous"},
-        callback_handler=None,
+def get_history() -> FileHistoryProvider:
+    """One JSONL file per conversation: <SESSIONS_DIR>/<conversation_id>.jsonl"""
+    return FileHistoryProvider(SESSIONS_DIR)
+
+
+def build_orchestrator(conversation_id: str, user_id: str | None = None) -> tuple[Agent, AgentSession]:
+    """Build the orchestrator for one conversation. History is loaded/saved per session by the history provider."""
+    set_trace_attributes({"session.id": conversation_id, "user.id": user_id or "anonymous"})
+    history = get_history()
+    agent = Agent(
+        client=get_client(),
+        instructions=ORCHESTRATOR_PROMPT,
+        name="orchestrator",
+        tools=[billing_agent(), tech_support_agent()],
+        default_options=MODEL_OPTIONS,
+        context_providers=[
+            history,
+            # Only the most recent turns are sent to the model; the file keeps the full history
+            CompactionProvider(
+                before_strategy=SlidingWindowStrategy(keep_last_groups=20),
+                history_source_id=history.source_id,
+            ),
+        ],
     )
+    return agent, agent.create_session(session_id=conversation_id)
 ```
 
 **Quick check** (`python -c` or a throwaway script):
@@ -597,7 +647,6 @@ def get_lock(conversation_id: str) -> asyncio.Lock:
 **`app/api/conversations.py`**:
 
 ```python
-import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -605,7 +654,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 
-from app.agents.orchestrator import build_orchestrator
+from app.agents.orchestrator import get_history
 from app.auth import get_current_user
 from app.config import SESSIONS_DIR
 from app.db import get_conn
@@ -659,16 +708,21 @@ def create_conversation(user_id: str = Depends(get_current_user)) -> dict:
 
 
 @router.get("/{conversation_id}/messages")
-def get_messages(conversation_id: UUID, user_id: str = Depends(get_current_user)) -> list[dict]:
+async def get_messages(conversation_id: UUID, user_id: str = Depends(get_current_user)) -> list[dict]:
     cid = str(conversation_id)
     require_owner(cid, user_id)
-    agent = build_orchestrator(cid, user_id)  # session manager reloads the history
     history = []
-    for msg in agent.messages:
-        # Keep only the text parts; skip toolUse / toolResult
-        text = "".join(block["text"] for block in msg["content"] if "text" in block)
-        if text.strip():
-            history.append({"role": msg["role"], "content": text})
+    for msg in await get_history().get_messages(cid):
+        # Keep text only; skip function calls / function results
+        text = msg.text
+        if msg.role not in ("user", "assistant") or not text.strip():
+            continue
+        # One orchestrator turn can span several assistant messages (with tool results in between);
+        # merge them into one bubble, like during streaming
+        if history and history[-1]["role"] == msg.role == "assistant":
+            history[-1]["content"] += "\n\n" + text
+        else:
+            history.append({"role": msg.role, "content": text})
     return history
 
 
@@ -678,8 +732,8 @@ def delete_conversation(conversation_id: UUID, user_id: str = Depends(get_curren
     require_owner(cid, user_id)
     with get_conn() as conn:
         conn.execute("DELETE FROM conversations WHERE id = ?", (cid,))
-    # FileSessionManager stores data at <SESSIONS_DIR>/session_<id>/
-    shutil.rmtree(Path(SESSIONS_DIR) / f"session_{cid}", ignore_errors=True)
+    # FileHistoryProvider stores data in <SESSIONS_DIR>/<id>.jsonl
+    (Path(SESSIONS_DIR) / f"{cid}.jsonl").unlink(missing_ok=True)
     return Response(status_code=204)
 ```
 
@@ -712,7 +766,7 @@ app.include_router(conversations.router)
 app.include_router(chat.router)
 ```
 
-In this phase `chat.py` can be a non-streaming version (using `invoke_async`) to test the logic first; Phase 3 replaces it with the SSE version below.
+In this phase `chat.py` can be a non-streaming version (`await agent.run(message, session=session)`) to test the logic first; Phase 3 replaces it with the SSE version below.
 
 **Test with curl:**
 
@@ -734,7 +788,7 @@ echo $CID
 
 ### Phase 3 — Streaming (SSE)
 
-Use Strands' `stream_async` and map the orchestrator's events to SSE events. The lock is held for the entire stream and is always released in `finally` (including when the client disconnects).
+Use `agent.run(..., stream=True, session=session)` and map each `AgentResponseUpdate` to SSE events: `update.text` → `token`, the first `function_call` content per `call_id` → `tool_start`. Iterating the stream to the end is what triggers `FileHistoryProvider` to save the turn. The lock is held for the entire stream and is always released in `finally` (including when the client disconnects).
 
 **`app/api/chat.py`**:
 
@@ -747,6 +801,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 from app.agents.orchestrator import build_orchestrator
 from app.api.conversations import require_owner, touch_conversation
@@ -780,36 +835,47 @@ async def send_message(
         raise HTTPException(status_code=409, detail="Conversation is still processing the previous message")
     await lock.acquire()
 
+    released = False
+
+    def release() -> None:
+        # Called from the stream's finally and from a background task (if the client disconnects
+        # before the stream starts, finally never runs). Releases exactly once.
+        nonlocal released
+        if not released:
+            released = True
+            lock.release()
+
     async def event_stream():
         announced: set[str] = set()
         try:
-            agent = build_orchestrator(cid, user_id)
+            agent, session = build_orchestrator(cid, user_id)
             async with asyncio.timeout(TURN_TIMEOUT_S):
-                async for event in agent.stream_async(body.message):
-                    if "data" in event:
-                        yield sse("token", {"text": event["data"]})
+                async for update in agent.run(body.message, stream=True, session=session):
+                    if update.text:
+                        yield sse("token", {"text": update.text})
 
-                    tool_use = event.get("current_tool_use")
-                    if tool_use and tool_use.get("name"):
-                        tool_id = tool_use.get("toolUseId")
-                        if tool_id not in announced:  # this event repeats while the input streams in
-                            announced.add(tool_id)
-                            yield sse("tool_start", {"tool": tool_use["name"]})
+                    for content in update.contents:
+                        # Tool-call arguments stream in over several chunks; only the first carries the name
+                        if content.type == "function_call" and content.name and content.call_id not in announced:
+                            announced.add(content.call_id)
+                            yield sse("tool_start", {"tool": content.name})
 
             touch_conversation(cid, body.message)
             yield sse("done", {})
         except TimeoutError:
+            logger.warning("Timeout conversation_id=%s user_id=%s", cid, user_id)
             yield sse("error", {"message": "Request timed out, please try again"})
         except Exception:
-            logger.exception("Error handling conversation %s", cid)
+            logger.exception("Error handling conversation_id=%s user_id=%s", cid, user_id)
             yield sse("error", {"message": "Something went wrong, please try again"})
         finally:
-            lock.release()
+            release()
 
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        background=BackgroundTask(release),
     )
 ```
 
@@ -1125,7 +1191,8 @@ export default function ChatPane({ conversationId, onTurnComplete }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    api.getMessages(conversationId).then(setMessages);
+    // Don't clobber a message sent before the history request returned
+    api.getMessages(conversationId).then((history) => setMessages((prev) => (prev.length ? prev : history)));
   }, [conversationId]);
 
   useEffect(() => {
@@ -1140,6 +1207,14 @@ export default function ChatPane({ conversationId, onTurnComplete }: Props) {
       return copy;
     });
 
+  // The orchestrator may write an intro before calling an agent; split paragraphs like reloaded history
+  const breakParagraph = () =>
+    setMessages((prev) => {
+      const last = prev[prev.length - 1];
+      if (!last.content || last.content.endsWith("\n\n")) return prev;
+      return [...prev.slice(0, -1), { ...last, content: last.content + "\n\n" }];
+    });
+
   const send = async () => {
     const text = input.trim();
     if (!text || busy) return;
@@ -1150,7 +1225,10 @@ export default function ChatPane({ conversationId, onTurnComplete }: Props) {
 
     await sendMessage(conversationId, text, {
       onToken: appendToLast,
-      onToolStart: (tool) => setActivity((prev) => [...prev, TOOL_LABELS[tool] ?? `Running ${tool}…`]),
+      onToolStart: (tool) => {
+        breakParagraph();
+        setActivity((prev) => [...prev, TOOL_LABELS[tool] ?? `Running ${tool}…`]);
+      },
       onDone: onTurnComplete,
       onError: (msg) => appendToLast(`\n\n⚠️ ${msg}`),
     });
@@ -1159,10 +1237,15 @@ export default function ChatPane({ conversationId, onTurnComplete }: Props) {
     setActivity([]);
   };
 
+  const last = messages[messages.length - 1];
+  const waiting = busy && activity.length === 0 && last?.content === "";
+
   return (
     <main className="flex flex-1 flex-col">
       <div className="flex-1 space-y-3 overflow-y-auto p-6">
-        {messages.map((m, i) => <MessageBubble key={i} message={m} />)}
+        {messages.map((m, i) =>
+          m.content ? <MessageBubble key={i} message={m} /> : null)}
+        {waiting && <p className="text-sm italic text-gray-500">Thinking…</p>}
         {busy && activity.map((a, i) => (
           <p key={i} className="text-sm italic text-gray-500">{a}</p>
         ))}
@@ -1177,7 +1260,7 @@ export default function ChatPane({ conversationId, onTurnComplete }: Props) {
           placeholder="Ask a question…"
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); }
           }}
         />
         <button onClick={send} disabled={busy} className="rounded bg-blue-600 px-4 text-white disabled:opacity-50">
@@ -1199,17 +1282,63 @@ export default function ChatPane({ conversationId, onTurnComplete }: Props) {
 
 ### Phase 5 — Observability and resilience
 
-Enable Strands' OpenTelemetry and export traces to Langfuse to see the **orchestrator → specialist → tool** call tree, with latency and tokens for each step. The `trace_attributes` in `build_orchestrator` (Phase 1) already attach `session.id` and `user.id` so traces can be filtered by conversation.
+Enable Agent Framework's OpenTelemetry instrumentation (`enable_instrumentation()`) and export traces over OTLP/HTTP to Langfuse to see the **orchestrator → specialist → tool** call tree, with latency and tokens for each step. `build_orchestrator` (Phase 1) calls `set_trace_attributes()`, and a span processor stamps `session.id` and `user.id` on every span so traces can be filtered by conversation.
 
 **`app/telemetry.py`**:
 
 ```python
-from strands.telemetry import StrandsTelemetry
+import logging
+import os
+from contextvars import ContextVar
+
+import httpx
+
+from app.config import OMLX_API_KEY, OMLX_BASE_URL
+
+logger = logging.getLogger(__name__)
+
+# Attributes stamped on every span of the current request (e.g. session.id / user.id for Langfuse filtering)
+_trace_attributes: ContextVar[dict[str, str]] = ContextVar("trace_attributes", default={})
+
+
+def set_trace_attributes(attributes: dict[str, str]) -> None:
+    _trace_attributes.set(attributes)
 
 
 def setup_telemetry() -> None:
-    # Reads OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_HEADERS from the environment
-    StrandsTelemetry().setup_otlp_exporter()
+    """Enable OTLP tracing (e.g. Langfuse) only when OTEL_EXPORTER_OTLP_ENDPOINT is set."""
+    if not os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        logger.info("Telemetry disabled (OTEL_EXPORTER_OTLP_ENDPOINT not set)")
+        return
+    from agent_framework.observability import enable_instrumentation
+    from opentelemetry import trace
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+    class TraceAttributesProcessor(SpanProcessor):
+        def on_start(self, span, parent_context=None) -> None:
+            span.set_attributes(_trace_attributes.get())
+
+    provider = TracerProvider(resource=Resource.create({"service.name": "agentic-support-demo"}))
+    provider.add_span_processor(TraceAttributesProcessor())
+    # Reads OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_HEADERS from the environment (OTLP over HTTP)
+    provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+    trace.set_tracer_provider(provider)
+    enable_instrumentation()
+    logger.info("Telemetry enabled -> %s", os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"])
+
+
+async def check_model_server() -> None:
+    """Check that oMLX is up at startup; only warn, never block the server."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            res = await client.get(f"{OMLX_BASE_URL}/models", headers={"Authorization": f"Bearer {OMLX_API_KEY}"})
+            res.raise_for_status()
+        logger.info("Model server reachable: %s", OMLX_BASE_URL)
+    except Exception as e:
+        logger.warning("Cannot reach model server %s: %s", OMLX_BASE_URL, e)
 ```
 
 Call it in the `lifespan` of `main.py`:
@@ -1362,17 +1491,17 @@ docker compose up --build
 | Local model calls tools unreliably | Check in Phase 0; tools with few parameters and clear docstrings; low `temperature`; if below 9/10, switch to a larger model |
 | "Thinking" model prints its reasoning into the answer | Turn off the model's thinking mode in oMLX or via `params`; check this right away in Phase 0 |
 | Slowness from nested model calls (a two-part question can take 5–7 LLM calls) | Stream tokens + show agent status so viewers can see the system is working; oMLX's SSD-backed KV cache makes subsequent turns faster |
-| Context bloat in long chats | `SlidingWindowConversationManager(window_size=20)`; stateless sub-agents |
+| Context bloat in long chats | `CompactionProvider(before_strategy=SlidingWindowStrategy(keep_last_groups=20))`; the JSONL file keeps the full history; stateless sub-agents |
 | Lock is only correct with a single backend instance | Good enough for the demo; switch to a Redis lock in production |
-| Strands API changes between versions | Pin versions in `requirements.txt` after Phase 0 |
+| Agent Framework API changes between versions (`FileHistoryProvider` is still marked experimental) | Pin versions in `requirements.txt` after Phase 0 |
 
 ---
 
 ## 9. After the demo: path to production
 
-- **Session storage:** move from `FileSessionManager` to storage on S3, prefixed by tenant (`tenants/{tenant_id}/`). Newer Strands docs recommend `SnapshotSessionManager` for single-agent sessions; re-check when migrating.
+- **Session storage:** move from `FileHistoryProvider` to shared storage, prefixed by tenant (`tenants/{tenant_id}/`): `RedisHistoryProvider` from `agent-framework-redis`, or a custom `HistoryProvider` subclass over S3/Postgres.
 - **Lock:** Redis lock per `conversation_id` to run multiple pods.
 - **Auth:** replace the demo login with OIDC (Cognito/Keycloak/Entra ID).
 - **Model:** point `OMLX_BASE_URL` at vLLM on a GPU server or at Bedrock; the agent code stays the same.
 - **Deploy:** backend container on EKS, frontend on S3 + CloudFront.
-- **Evals:** use the `strands-agents` evals SDK to automatically score a sample question set whenever the prompt or model changes.
+- **Evals:** extend the Phase 0 smoke test into a scored sample question set that runs automatically whenever the prompt or model changes.
